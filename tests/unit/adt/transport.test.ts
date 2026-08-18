@@ -84,11 +84,11 @@ describe('Transport Management', () => {
       expect(url).toContain('user=TESTUSER');
     });
 
-    it('does not add user param for wildcard', async () => {
+    it("sends user=* for SAP's wildcard owner query", async () => {
       const http = mockHttp('<tm:root xmlns:tm="http://www.sap.com/cts/transports"/>');
       await listTransports(http, enabledSafety, '*');
       const url = (http.get as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as string;
-      expect(url).not.toContain('user=');
+      expect(new URL(url, 'https://sap.example').searchParams.get('user')).toBe('*');
     });
 
     it('sends requestType=KWT and target=true (sapcli pattern)', async () => {

@@ -679,6 +679,47 @@ describe('SAPTransport + SAPWrite transport behavior', () => {
       expect(fetchUrl?.[0]).toContain('requestType=KWT');
     });
 
+    it("list with user=* forwards SAP's wildcard owner query", async () => {
+      const xml = `<tm:root xmlns:tm="http://www.sap.com/cts/transports">
+        <tm:request tm:number="DEVK900001" tm:owner="OTHER" tm:desc="Other user transport" tm:status="D" tm:type="K"/>
+      </tm:root>`;
+      mockFetch.mockResolvedValue(mockResponse(200, xml, { 'x-csrf-token': 'T' }));
+      const result = await handleToolCall(createTransportClient(), DEFAULT_CONFIG, 'SAPTransport', {
+        action: 'list',
+        user: '*',
+      });
+      expect(result.isError).toBeUndefined();
+      const fetchUrl = mockFetch.mock.calls.find(
+        (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('transportrequests'),
+      );
+      const requestUrl = new URL(String(fetchUrl?.[0]), 'https://sap.example');
+      expect(requestUrl.searchParams.get('user')).toBe('*');
+      const parsed = JSON.parse(result.content[0]?.text ?? '{}');
+      expect(parsed.total).toBe(1);
+    });
+
+    it('list with user=* and truncated results includes user=<name> hint', async () => {
+      const rows = Array.from(
+        { length: 60 },
+        (_, i) =>
+          `<tm:request tm:number="DEVK9${String(i).padStart(5, '0')}" tm:owner="USER${i}" tm:desc="R${i}" tm:status="D" tm:type="K"/>`,
+      ).join('');
+      mockFetch.mockResolvedValue(
+        mockResponse(200, `<tm:root xmlns:tm="http://www.sap.com/cts/transports">${rows}</tm:root>`, {
+          'x-csrf-token': 'T',
+        }),
+      );
+      const result = await handleToolCall(createTransportClient(), DEFAULT_CONFIG, 'SAPTransport', {
+        action: 'list',
+        user: '*',
+      });
+      const parsed = JSON.parse(result.content[0]!.text);
+      expect(parsed.truncated).toBe(true);
+      // Hint should guide the LLM to narrow by user when querying all users
+      expect(parsed.hint).toContain('user=');
+      expect(parsed.hint).toContain('(all visible users)');
+    });
+
     it('list with status=* returns all statuses', async () => {
       const xml = `<tm:root xmlns:tm="http://www.sap.com/cts/transports">
         <tm:request tm:number="DEVK900001" tm:owner="admin" tm:desc="Modifiable" tm:status="D" tm:type="K"/>

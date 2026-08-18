@@ -136,12 +136,13 @@ export async function listTransports(
 ): Promise<TransportRequest[]> {
   checkTransport(safety, '', 'ListTransports', false);
 
-  // Build query params following sapcli's pattern:
-  //   user={user}&target=true&requestType=KWT&requestStatus=DR
+  // Build query params.
   // requestType=KWT covers Workbench, Customizing, Transport of Copies.
   // requestStatus is sent server-side; we also filter client-side as a fallback.
+  // Keep user=* in the request: SAP treats '*' as a wildcard owner pattern.
+  // Omitting user defaults it to sy-uname on SAP_BASIS 7.50 and 7.58.
   const params = new URLSearchParams();
-  if (user && user !== '*') {
+  if (user) {
     params.set('user', user);
   }
   params.set('target', 'true');
