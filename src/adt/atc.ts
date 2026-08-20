@@ -17,8 +17,13 @@ export interface AtcFinding {
   hasQuickfix?: boolean;
 }
 
-/** How the check variant bound at worklist creation was chosen. */
-export type AtcVariantSource = 'requested' | 'systemDefault' | 'sapFallback';
+/**
+ * How the check variant bound at worklist creation was chosen.
+ *
+ * `requestedUnverified` = the caller named it, but `/atc/variants` was unreachable, so ARC-1 could
+ * not confirm SAP will honour the name rather than silently substituting `DEFAULT`.
+ */
+export type AtcVariantSource = 'requested' | 'requestedUnverified' | 'systemDefault' | 'sapFallback';
 
 export interface AtcRunResult {
   findings: AtcFinding[];
@@ -56,6 +61,24 @@ export interface AtcPollOptions {
 const DEFAULT_ATC_TIMEOUT_MS = 300_000;
 const DEFAULT_ATC_POLL_DELAY_MS = 250;
 const DEFAULT_ATC_MAX_POLL_DELAY_MS = 2_000;
+/**
+ * Minimum continuous quiet interval before an unchanged worklist is considered settled.
+ *
+ * A live 758 worklist grew from 23 findings/two objects to 73/ten after already reporting
+ * `objectSetIsComplete=true`, so neither that flag nor a few fast count snapshots are terminal
+ * evidence. Ten seconds spans at least five intervals at the default 2 s backoff cap. SAP also
+ * advances the root worklist timestamp on unchanged GETs, so that proven volatile attribute is
+ * excluded from the comparison.
+ * See docs/research/2026-08-20-atc-completeness-polling.md.
+ */
+const ATC_SETTLE_QUIET_MS = 10_000;
+
+/** Compare the complete wire response except SAP's per-GET root worklist timestamp. */
+function atcWorklistSettleObservation(xml: string): string {
+  return xml.replace(/<(?:[A-Za-z_][\w.-]*:)?worklist\b[^>]*>/, (rootStart) =>
+    rootStart.replace(/\s+(?:[A-Za-z_][\w.-]*:)?timestamp\s*=\s*(?:"[^"]*"|'[^']*')/, ''),
+  );
+}
 
 /** List the valid ATC check variants. */
 export async function listAtcVariants(
@@ -110,8 +133,9 @@ async function resolveCheckVariant(
     try {
       known = await listAtcVariants(http, safety, requested, requestOptions);
     } catch {
-      // best-effort-validation: endpoint absent, auth, or network — run with the caller's string.
-      return { variant: requested, variantSource: 'requested' };
+      // best-effort-validation: endpoint absent, auth, or network — run with the caller's string,
+      // but say so: SAP may still substitute DEFAULT and we did not get to check.
+      return { variant: requested, variantSource: 'requestedUnverified' };
     }
     const match = known.find((item) => item.name.toLowerCase() === requested.toLowerCase());
     if (!match) {
@@ -202,6 +226,8 @@ export async function runAtcCheck(
   let delayMs = pollOptions.initialDelayMs ?? DEFAULT_ATC_POLL_DELAY_MS;
   const maxDelayMs = pollOptions.maxDelayMs ?? DEFAULT_ATC_MAX_POLL_DELAY_MS;
   let result: AtcRunResult | undefined;
+  let lastWorklistObservation: string | undefined;
+  let unchangedSince: number | undefined;
 
   while (true) {
     let resultResp: AdtResponse;
@@ -236,12 +262,31 @@ export async function runAtcCheck(
       expectedFindingCount,
       runStatusCode: runResp.statusCode,
     });
+    // Counts alone miss same-count replacements and other response-evidence changes. Compare the
+    // full XML except the root timestamp, which live 758 advances on otherwise identical GETs.
+    const observedAt = now();
+    const observation = atcWorklistSettleObservation(resultResp.body);
+    if (observation !== lastWorklistObservation) {
+      lastWorklistObservation = observation;
+      unchangedSince = observedAt;
+    }
+    const unchangedForMs = unchangedSince === undefined ? 0 : observedAt - unchangedSince;
+    const settled = unchangedForMs >= ATC_SETTLE_QUIET_MS;
     if (
       expectedFindingCount === null ||
       result.complete ||
       result.findingCount > expectedFindingCount ||
-      now() >= deadline
+      settled ||
+      observedAt >= deadline
     ) {
+      if (settled && !result.complete) {
+        result.incompleteReasons.push(
+          `ATC worklist response, excluding SAP's poll timestamp, was unchanged for at least ` +
+            `${ATC_SETTLE_QUIET_MS / 1_000} seconds at ` +
+            `${result.findingCount} finding(s) over ${result.processedObjectCount} object(s) without satisfying ` +
+            "SAP's completeness evidence; returning the settled result.",
+        );
+      }
       return result;
     }
     await sleep(Math.min(delayMs, Math.max(0, deadline - now())));
