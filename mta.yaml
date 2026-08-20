@@ -80,8 +80,7 @@ modules:
       builder: custom
       commands: []
       ignore:
-        - .env
-        - .env.*
+        - .env*
         - .npmrc
         - "*service-key*.json"
         - "*.key"
@@ -97,6 +96,7 @@ modules:
         - .cursor-plugin/
         - .cursorignore
         - .dockerignore
+        - .gitattributes
         - .gitignore
         - .mcp.json.example
         - .mcpbignore
